@@ -1,12 +1,16 @@
 from datetime import datetime
-from os import remove
+from os import remove, listdir, mkdir
 from bs4 import BeautifulSoup as bs
 import requests
-from zipfile import ZipFile
 import pandas as pd
+import threading
+import shutil
 
 URL = "http://ftp.dadosabertos.ans.gov.br/FTP/PDA/demonstracoes_contabeis/"
-FILETYPE = ".zip"
+TIPOZIP = ".zip"
+TIPOCSV = ".csv"
+TIPOSQL = ".sql"
+arquivos_csv = []
 
 
 def get_soup(url: str) -> bs:
@@ -18,69 +22,144 @@ def get_soup(url: str) -> bs:
     return bs(requests.get(url).content, "html.parser")
 
 
-def baixar_dados(soup: bs, ano: str, arquivos_csv: list) -> list:
+def baixar_dados(soup: bs, ano: str) -> None:
     """
-    Faz o download do ultimo arquivo TISS.
+    Faz o download dos arquivos dos ultimos dois anos.
     :param soup: bs
     :param ano: str
-    :param arquivos_csv: list
-    :return: list
+    :return: None
     :raises: Exception
     """
+    print("Baixando dados do ano: " + ano)
     links = soup.find_all("a")
     try:
         for link in links:
-            if FILETYPE in link.get("href"):
-                with open(link.get("href"), "wb") as arquivo_zip:
+            if TIPOZIP in link.get("href"):
+                with open("./zip/" + link.get("href"), "wb") as arquivo_zip:
                     arquivo_zip.write(
                         requests.get(URL + ano + "/" + link.get("href")).content
                     )
                 extrair_zip(link.get("href"))
-                arquivos_csv.append(link.get("href").replace(FILETYPE, ".csv"))
-        return arquivos_csv
+                arquivos_csv.append(
+                    "./dados/" + link.get("href").replace(TIPOZIP, TIPOCSV)
+                )
+        print("Arquivos do ano: " + ano + " baixados!\n")
     except Exception:
         raise Exception("Não foi possivel fazer o download dos arquivos!")
 
 
+def criar_pastas() -> None:
+    """
+    Cria as pastas necessarias para o processamento.
+    :return: None
+    """
+    try:
+        mkdir("./dados")
+        mkdir("./zip")
+        mkdir("./queries")
+    except FileExistsError:
+        pass
+
+
 def extrair_zip(nome_arquivo) -> None:
     """
-    Extrai os dados do arquivo zip
+    Extrai o arquivo zip
     :param nome_arquivo: str
     :return: None
     """
-    with ZipFile(nome_arquivo, "r") as arquivo_zip:
-        arquivo_zip.extractall()
-    remove(nome_arquivo)
+    print("Extraindo arquivo zip...")
+    try:
+        shutil.unpack_archive("./zip/" + nome_arquivo, "./dados/")
+    except Exception:
+        raise Exception("Não foi possivel extrair o arquivo!")
 
 
-def montar_queries(arquivos_csv: list) -> dict:
+def montar_queries(sql: list) -> None:
     """
     Monta as queries para o mysql.
-    :param arquivos_csv: list
     :return: dict
     """
-    sql = {}
-    index = 0
-    for arquivo_csv in arquivos_csv:
-        df = pd.read_csv(arquivo_csv, sep=";", encoding="ISO-8859-1")
-        for _, row in df.iterrows():
-            sql[
-                index
-            ] = f"INSERT INTO demonstracao_contabeis (DATA, REG_ANS, CD_CONTA_CONTABIL, DESCRICAO, VL_SALDO_FINAL) VALUES ('{row['DATA']}', '{row['REG_ANS']}', '{row['CD_CONTA_CONTABIL']}', '{row['DESCRICAO']}', '{row['VL_SALDO_FINAL']}');"
-            index += 1
-        print("Arquivo: " + arquivo_csv + " processado!")
-    return sql
+    try:
+        lista_i = 0
+        print("Montando queries...")
+        for arquivo_csv in arquivos_csv:
+            dict_i = 0
+            sql.append({})
+            csv = pd.read_csv(
+                arquivo_csv,
+                sep=";",
+                encoding="ISO-8859-1",
+            )
+            for _, row in csv.iterrows():
+                # coloca a data no formato YYYY-MM-DD
+                data = formatar_data(row["DATA"])
+                # substitui as virgulas da coluna VL_SALDO_FINAL por ponto
+                valor = row["VL_SALDO_FINAL"].replace(",", ".")
+                # remove os caracteres vazios desnecessarios na DESCRICAO
+                descricao = tratar_descricao(row["DESCRICAO"])
+                sql[lista_i][
+                    dict_i
+                ] = f"INSERT INTO dem_contabeis (DC_DATA, DC_REG_ANS, DC_CD_CONTA_CONTABIL, DC_DESCRICAO, DC_VL_SALDO_FINAL) VALUES ('{data}', '{row['REG_ANS']}', '{row['CD_CONTA_CONTABIL']}', {descricao}, '{valor}');"
+                dict_i += 1
+            lista_i += 1
+            # limpa a memoria
+            del csv
+            print("Arquivo: " + arquivo_csv + " processado!")
+        print("Queries montadas!\n")
+    except Exception:
+        raise Exception("Não foi possivel montar as queries!")
+
+
+def tratar_descricao(descricao: str) -> str:
+    """
+    Trata a ocorrencia desnecessaria de caracteres vazios na string.
+    :param descricao: str
+    :return: str
+    """
+    descricao = "'" + descricao + "'"
+    descricao = descricao.replace("  ", " ")
+    descricao = descricao.replace(" '", "'")
+    return descricao
+
+
+def formatar_data(data: str) -> str:
+    """
+    Formata a data para YYYY-MM-DD.
+    :param data: str
+    :return: str
+    """
+    data = data.split("/")
+    return data[2] + "-" + data[1] + "-" + data[0]
+
+
+def remover_zip() -> None:
+    """
+    Remove os arquivos zip baixados.
+    :return: None
+    """
+    try:
+        print("Deletando a pasta de arquivos zip...")
+        remove("./zip/")
+    except Exception:
+        print("Não foi possivel remover a pasta de arquivos zip!")
 
 
 def gerar_arquivo_sql(sql: dict) -> None:
     """
-    Cria o arquivo sql.
+    Cria o arquivo sql a partir das queries do dict.
     :param sql: dict
     :return: None
     """
-    with open("insert_queries.sql", "w") as arquivo_sql:
-        for _, query in sql.items():
-            arquivo_sql.write(query + "\n")
+    index = 0
+    print("Gerando arquivos sql...")
+    while arquivos_csv:
+        with open(
+            "./queries/" + "insert_" + arquivos_csv.pop()[8:][:6] + TIPOSQL, "w"
+        ) as arquivo_sql:
+            for dict_i in range(len(sql[index])):
+                arquivo_sql.write(sql[index][dict_i] + "\n")
+        index += 1
+        print("Novo arquivo sql gerado!")
 
 
 def main() -> None:
@@ -88,17 +167,32 @@ def main() -> None:
     Funcão principal.
     :return: None
     """
-    arquivos_csv = []
+    criar_pastas()
+
     ano = datetime.now().year
 
-    soup = get_soup(URL + str(ano))
-    arquivos_csv = baixar_dados(soup, str(ano), arquivos_csv)
+    # multithreading na execução dos downloads e extracao dos arquivos
+    soup_1 = get_soup(URL + str(ano - 1))
+    thread = threading.Thread(
+        target=baixar_dados,
+        args=(
+            soup_1,
+            str(ano - 1),
+        ),
+    )
 
-    soup = get_soup(URL + str(ano - 1))
-    arquivos_csv = baixar_dados(soup, str(ano - 1), arquivos_csv)
+    thread.start()
 
-    sql = montar_queries(arquivos_csv)
+    soup_2 = get_soup(URL + str(ano))
+    baixar_dados(soup_2, str(ano))
+
+    thread.join()
+    # fim multithreading
+
+    sql = [{}]
+    montar_queries(sql)
     gerar_arquivo_sql(sql)
+    remover_zip()
 
 
 __name__ == "__main__" and main()
