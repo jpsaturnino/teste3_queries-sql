@@ -1,5 +1,5 @@
 from datetime import datetime
-from os import remove, listdir, mkdir
+from os import remove, mkdir
 from bs4 import BeautifulSoup as bs
 import requests
 import pandas as pd
