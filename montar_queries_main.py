@@ -1,3 +1,7 @@
+"""
+Jose Paulo
+Teste3_Montar_Queries
+"""
 from datetime import datetime
 from os import remove, mkdir
 from bs4 import BeautifulSoup as bs
